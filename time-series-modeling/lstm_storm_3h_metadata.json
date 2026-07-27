@@ -1,0 +1,26 @@
+{
+  "model_name": "LSTM 3h Storm Classifier",
+  "model_type": "LSTM (2x128) + pos-weighted BCE over 48h solar-wind windows",
+  "target": "storm_3h",
+  "horizon_hours": 3,
+  "train_period": "2010-01-01 to 2021-12-31",
+  "test_period": "2022-01-01 to 2024-12-30",
+  "feature_set": "16-bin (48h) window of 8 solar-wind + Ap channels",
+  "sequence_features": [
+    "bz_gsm_nt_last",
+    "b_magnitude_avg_nt_last",
+    "flow_speed_kms_last",
+    "proton_density_cm3_last",
+    "flow_pressure_npa_last",
+    "electric_field_mvpm_last",
+    "bz_south_last",
+    "ap_now"
+  ],
+  "operating_threshold": 0.795,
+  "test_roc_auc": 0.962,
+  "test_pr_auc": 0.61,
+  "storm_precision": 0.729,
+  "storm_recall": 0.448,
+  "storm_f1": 0.555,
+  "notes": "Sequence model; predicts from a rolling 48h history rather than a single bin. Trained on the same calendar split as the deployed XGBoost for direct comparison."
+}
