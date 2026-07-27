@@ -1,10 +1,11 @@
 """Geomagnetic Storm Predictor — Streamlit app.
 
-Serves two deployed classifiers on the team's time-binned dataset (3-hour bins)
+Serves three deployed classifiers on the team's time-binned dataset (3-hour bins)
 to predict geomagnetic storms (Ap-index threshold): a gradient-boosting model
-(XGBoost) that scores each bin from its own features, and an LSTM that reads a
-rolling 48-hour window of solar-wind history. Both use the same time-based split
-as the modeling notebooks (train < 2022-01-01, test >= 2022-01-01).
+(XGBoost) that scores each bin from its own features, an LSTM that reads a rolling
+48-hour window of solar-wind history, and a TCN (causal, dilated convolutions) that
+reads the same kind of window without the current Ap index. All three use the same
+time-based split as the modeling notebooks (train < 2022-01-01, test >= 2022-01-01).
 """
 import json
 from pathlib import Path
@@ -28,14 +29,18 @@ from sklearn.metrics import (
 DATA_PATH = "data/time_binned_dataset.csv"
 SPLIT_DATE = "2022-01-01"
 HORIZONS = [3]
+MODEL_NAMES = ("XGBoost", "LSTM", "TCN")
 XGB_MODEL_PATH = Path("time-series-modeling/xgboost_storm_3h_deployed.joblib")
 XGB_METADATA_PATH = Path("time-series-modeling/xgboost_storm_3h_metadata.json")
 LSTM_METADATA_PATH = Path("time-series-modeling/lstm_storm_3h_metadata.json")
 LSTM_PRED_PATH = Path("time-series-modeling/lstm_storm_3h_predictions.parquet")
+TCN_METADATA_PATH = Path("time-series-modeling/tcn_storm_3h_metadata.json")
+TCN_PRED_PATH = Path("time-series-modeling/tcn_storm_3h_predictions.parquet")
 
 # Palette (validated for CVD safety and contrast)
 BLUE = "#2a78d6"
 RED = "#e34948"
+GREEN = "#1a9e77"  # third categorical color (TCN); kept distinct from BLUE/RED under CVD
 INK = "#0b0b0b"
 INK_SECONDARY = "#52514e"
 MUTED = "#898781"
@@ -66,10 +71,16 @@ def load_data():
     df[float_cols] = df[float_cols].astype("float32")
     return df
 
+METADATA_PATHS = {
+    "XGBoost": XGB_METADATA_PATH,
+    "LSTM": LSTM_METADATA_PATH,
+    "TCN": TCN_METADATA_PATH,
+}
+
+
 @st.cache_data(show_spinner="Loading model metadata…")
 def load_metadata(model_choice):
-    path = LSTM_METADATA_PATH if model_choice == "LSTM" else XGB_METADATA_PATH
-    with open(path) as f:
+    with open(METADATA_PATHS[model_choice]) as f:
         return json.load(f)
 
 
@@ -100,6 +111,17 @@ def _score_lstm(df):
     return test, test["storm_probability"].to_numpy()
 
 
+def _score_tcn(df):
+    """Serve the TCN's cached test-period predictions (exported directly by
+    time-series-modeling/tcn.ipynb's "Export for the Streamlit App" section, the
+    same way xgboost.ipynb saves its own deploy artifacts). Kept torch-free so the
+    dashboard process stays light and stable."""
+    preds = pd.read_parquet(TCN_PRED_PATH)
+    test = df[df["datetime"] >= SPLIT_DATE].merge(preds, on="datetime", how="inner")
+    test = test.sort_values("datetime").reset_index(drop=True)
+    return test, test["storm_probability"].to_numpy()
+
+
 @st.cache_resource(show_spinner="Scoring test period…")
 def train_model(horizon, model_choice):
     if horizon != 3:
@@ -107,6 +129,8 @@ def train_model(horizon, model_choice):
     df = load_data()
     if model_choice == "LSTM":
         test, proba = _score_lstm(df)
+    elif model_choice == "TCN":
+        test, proba = _score_tcn(df)
     else:
         test, proba = _score_xgb(df)
     return test, proba
@@ -122,8 +146,8 @@ st.sidebar.title("🌌 Storm Predictor")
 page = st.sidebar.radio("Page", ["Overview", "Model performance", "Forecast explorer"])
 st.sidebar.markdown("---")
 st.sidebar.caption(
-    "Two deployed models — **XGBoost** and **LSTM** — both trained on 2010–2021 "
-    "and tested on 2022–2024."
+    "Three deployed models — **XGBoost**, **LSTM**, and **TCN** — all trained on "
+    "2010–2021 and tested on 2022–2024."
 )
 horizon = st.sidebar.select_slider("Forecast horizon (hours)", options=HORIZONS, value=3)
 st.sidebar.caption(
@@ -182,15 +206,15 @@ if page == "Overview":
 elif page == "Model performance":
     st.title("Model performance")
     st.write(
-        "Both deployed models scored on the **same** held-out test period "
+        "All three deployed models scored on the **same** held-out test period "
         "(2022–2024), so the numbers are directly comparable. Use the sliders to "
         "move each model's decision threshold — they start at each model's tuned "
         "optimum (the value that maximised F1 on validation)."
     )
 
-    # Score both models on the identical test period.
+    # Score all models on the identical test period.
     scored = {}
-    for name in ("XGBoost", "LSTM"):
+    for name in MODEL_NAMES:
         test_m, proba_m = train_model(horizon, name)
         meta_m = load_metadata(name)
         scored[name] = (test_m, proba_m, meta_m)
@@ -199,10 +223,10 @@ elif page == "Model performance":
     y_true = scored["XGBoost"][0][target].values
 
     # ---- per-model decision-threshold sliders (default = tuned optimum) ----
-    thr_cols = st.columns(2)
+    thr_cols = st.columns(len(MODEL_NAMES))
     thresholds = {}
     recommended = {}
-    for col, name in zip(thr_cols, ("XGBoost", "LSTM")):
+    for col, name in zip(thr_cols, MODEL_NAMES):
         proba_m = scored[name][1]
         rec_thr = round(float(scored[name][2]["operating_threshold"]), 2)
         recommended[name] = rec_thr
@@ -222,7 +246,7 @@ elif page == "Model performance":
     # ---- side-by-side metric comparison ----
     st.subheader("Head-to-head metrics")
     rows = {}
-    for name in ("XGBoost", "LSTM"):
+    for name in MODEL_NAMES:
         proba_m, y_pred_m, thr = _preds(name)
         rows[name] = {
             "Threshold": round(thr, 2),
@@ -238,9 +262,9 @@ elif page == "Model performance":
     # ---- confusion matrices side by side ----
     st.subheader("Confusion matrices (at the selected thresholds)")
     cmap = LinearSegmentedColormap.from_list("seq_blue", SEQ_BLUES)
-    cm_cols = st.columns(2)
+    cm_cols = st.columns(len(MODEL_NAMES))
     cms = {}
-    for col, name in zip(cm_cols, ("XGBoost", "LSTM")):
+    for col, name in zip(cm_cols, MODEL_NAMES):
         proba_m, y_pred_m, thr = _preds(name)
         cm = confusion_matrix(y_true, y_pred_m)
         cms[name] = cm
@@ -262,9 +286,9 @@ elif page == "Model performance":
 
     # ---- overlaid precision-recall curves ----
     st.subheader("Precision–recall curves")
-    model_colors = {"XGBoost": BLUE, "LSTM": RED}
+    model_colors = {"XGBoost": BLUE, "LSTM": RED, "TCN": GREEN}
     fig, ax = plt.subplots(figsize=(6.4, 3.8))
-    for name in ("XGBoost", "LSTM"):
+    for name in MODEL_NAMES:
         proba_m, y_pred_m, thr = _preds(name)
         prec, rec, _ = precision_recall_curve(y_true, proba_m)
         ap_model = average_precision_score(y_true, proba_m)
@@ -289,7 +313,7 @@ elif page == "Model performance":
 
     # ---- narrative ----
     bits = []
-    for name in ("XGBoost", "LSTM"):
+    for name in MODEL_NAMES:
         tn, fp, fn, tp = cms[name].ravel()
         bits.append(f"**{name}** catches {tp} of {tp + fn} storms with {fp} false alarms")
     st.write(
@@ -305,7 +329,7 @@ else:
         "model's storm probability with what actually happened."
     )
 
-    explorer_model = st.radio("Model", ["XGBoost", "LSTM"], horizontal=True)
+    explorer_model = st.radio("Model", list(MODEL_NAMES), horizontal=True)
     test, proba = train_model(horizon, explorer_model)
     test = test.assign(storm_probability=proba)
 

@@ -1,0 +1,27 @@
+{
+  "model_name": "TCN 3h Storm Classifier",
+  "model_type": "Temporal Convolutional Network (4x64) + focal a.75 g2 over 16-bin solar-wind windows",
+  "target": "storm_3h",
+  "horizon_hours": 3,
+  "train_period": "2010-01-01 to 2021-12-31",
+  "test_period": "2022-01-01 to 2024-12-30",
+  "feature_set": "16-bin (48h) window of 8 solar-wind channels, no current Ap",
+  "sequence_features": [
+    "bz_gsm_nt_last",
+    "b_magnitude_avg_nt_last",
+    "flow_speed_kms_last",
+    "proton_density_cm3_last",
+    "flow_pressure_npa_last",
+    "electric_field_mvpm_last",
+    "bz_south_last",
+    "coupling_mean"
+  ],
+  "imbalance_strategy": "focal a.75 g2",
+  "operating_threshold": 0.6,
+  "test_roc_auc": 0.956,
+  "test_pr_auc": 0.602,
+  "storm_precision": 0.611,
+  "storm_recall": 0.552,
+  "storm_f1": 0.58,
+  "notes": "Causal, dilated convolutional sequence model; predicts from a rolling 48h solar-wind history without seeing the current Ap index. Architecture and imbalance strategy were both chosen by comparison on a chronological validation split in tcn.ipynb, then refit once on the full training window."
+}
