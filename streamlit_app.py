@@ -1,8 +1,9 @@
 """Geomagnetic Storm Predictor — Streamlit app.
 
-Trains a gradient-boosting classifier on the team's time-binned dataset
-(3-hour bins, 1995-2024) to predict geomagnetic storms (Ap-index threshold)
-at a selectable forecast horizon, using the same time-based train/test split
+Serves two deployed classifiers on the team's time-binned dataset (3-hour bins)
+to predict geomagnetic storms (Ap-index threshold): a gradient-boosting model
+(XGBoost) that scores each bin from its own features, and an LSTM that reads a
+rolling 48-hour window of solar-wind history. Both use the same time-based split
 as the modeling notebooks (train < 2022-01-01, test >= 2022-01-01).
 """
 import json
@@ -29,6 +30,8 @@ SPLIT_DATE = "2022-01-01"
 HORIZONS = [3]
 XGB_MODEL_PATH = Path("time-series-modeling/xgboost_storm_3h_deployed.joblib")
 XGB_METADATA_PATH = Path("time-series-modeling/xgboost_storm_3h_metadata.json")
+LSTM_METADATA_PATH = Path("time-series-modeling/lstm_storm_3h_metadata.json")
+LSTM_PRED_PATH = Path("time-series-modeling/lstm_storm_3h_predictions.parquet")
 
 # Palette (validated for CVD safety and contrast)
 BLUE = "#2a78d6"
@@ -63,9 +66,10 @@ def load_data():
     df[float_cols] = df[float_cols].astype("float32")
     return df
 
-@st.cache_data(show_spinner="Loading XGBoost metadata…")
-def load_xgb_metadata():
-    with open(XGB_METADATA_PATH) as f:
+@st.cache_data(show_spinner="Loading model metadata…")
+def load_metadata(model_choice):
+    path = LSTM_METADATA_PATH if model_choice == "LSTM" else XGB_METADATA_PATH
+    with open(path) as f:
         return json.load(f)
 
 
@@ -74,26 +78,38 @@ def load_xgb_model():
     return joblib.load(XGB_MODEL_PATH)
 
 
-@st.cache_resource(show_spinner="Scoring test period…")
-def train_model(horizon):
-    if horizon != 3:
-        raise ValueError("The deployed XGBoost model currently supports only the 3-hour horizon.")
-
-    df = load_data()
-    metadata = load_xgb_metadata()
+def _score_xgb(df):
+    metadata = load_metadata("XGBoost")
     model = load_xgb_model()
-
     features = metadata["features"]
-    target = metadata["target"]
-
-    missing_features = [col for col in features if col not in df.columns]
-    if missing_features:
-        raise ValueError(f"Missing required XGBoost features: {missing_features}")
-
+    missing = [c for c in features if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required XGBoost features: {missing}")
     test = df[df["datetime"] >= SPLIT_DATE].copy()
     proba = model.predict_proba(test[features])[:, 1]
+    return test.reset_index(drop=True), proba
 
-    return model, test.reset_index(drop=True), proba
+
+def _score_lstm(df):
+    """Serve the LSTM's cached test-period predictions (computed offline by
+    time-series-modeling/train_lstm_deploy.py). Kept torch-free so the dashboard
+    process stays light and stable."""
+    preds = pd.read_parquet(LSTM_PRED_PATH)
+    test = df[df["datetime"] >= SPLIT_DATE].merge(preds, on="datetime", how="inner")
+    test = test.sort_values("datetime").reset_index(drop=True)
+    return test, test["storm_probability"].to_numpy()
+
+
+@st.cache_resource(show_spinner="Scoring test period…")
+def train_model(horizon, model_choice):
+    if horizon != 3:
+        raise ValueError("The deployed models currently support only the 3-hour horizon.")
+    df = load_data()
+    if model_choice == "LSTM":
+        test, proba = _score_lstm(df)
+    else:
+        test, proba = _score_xgb(df)
+    return test, proba
 
 
 def storm_threshold(df, horizon):
@@ -105,6 +121,10 @@ def storm_threshold(df, horizon):
 st.sidebar.title("🌌 Storm Predictor")
 page = st.sidebar.radio("Page", ["Overview", "Model performance", "Forecast explorer"])
 st.sidebar.markdown("---")
+st.sidebar.caption(
+    "Two deployed models — **XGBoost** and **LSTM** — both trained on 2010–2021 "
+    "and tested on 2022–2024."
+)
 horizon = st.sidebar.select_slider("Forecast horizon (hours)", options=HORIZONS, value=3)
 st.sidebar.caption(
     f"Predicting whether a geomagnetic storm occurs {horizon} hours ahead, "
@@ -161,102 +181,132 @@ if page == "Overview":
 # -------------------------------------------------------------- model page --
 elif page == "Model performance":
     st.title("Model performance")
-    metadata = load_xgb_metadata()
-
     st.write(
-        f"Deployed **Candidate A XGBoost** model for 3-hour geomagnetic storm prediction. "
-        f"The model uses the no-current-Ap feature set, Random Oversampling during training, "
-        f"and a median-imputation + XGBoost pipeline. It was trained on 2010–2021 and "
-        f"evaluated on 2022–2024. The selected operating threshold is "
-        f"**{metadata['operating_threshold']:.2f}**."
+        "Both deployed models scored on the **same** held-out test period "
+        "(2022–2024), so the numbers are directly comparable. Use the sliders to "
+        "move each model's decision threshold — they start at each model's tuned "
+        "optimum (the value that maximised F1 on validation)."
     )
 
-    model, test, proba = train_model(horizon)
-    y_true = test[target].values
+    # Score both models on the identical test period.
+    scored = {}
+    for name in ("XGBoost", "LSTM"):
+        test_m, proba_m = train_model(horizon, name)
+        meta_m = load_metadata(name)
+        scored[name] = (test_m, proba_m, meta_m)
 
-    threshold = st.slider(
-        "Decision threshold (storm probability)",
-        min_value=0.05,
-        max_value=0.99,
-        value=float(metadata["operating_threshold"]),
-        step=0.01,
-    )
-    y_pred = (proba >= threshold).astype(int)
+    # y_true is shared (same rows, same order for both models).
+    y_true = scored["XGBoost"][0][target].values
 
-    # Persistence baseline: predict a storm if the current bin is already at
-    # storm level (the standard no-skill reference for space-weather models).
-    ap_storm_level = storm_threshold(df, horizon)
-    baseline_pred = (test["ap_now"] >= ap_storm_level).astype(int)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Precision", f"{precision_score(y_true, y_pred, zero_division=0):.2f}")
-    c2.metric("Recall", f"{recall_score(y_true, y_pred, zero_division=0):.2f}")
-    c3.metric("F1", f"{f1_score(y_true, y_pred, zero_division=0):.2f}")
-    c4.metric("ROC AUC", f"{roc_auc_score(y_true, proba):.3f}")
-
-    col_left, col_right = st.columns(2)
-
-    with col_left:
-        st.subheader("Confusion matrix")
-        cm = confusion_matrix(y_true, y_pred)
-        fig, ax = plt.subplots(figsize=(4.4, 3.6))
-        cmap = LinearSegmentedColormap.from_list("seq_blue", SEQ_BLUES)
-        ax.imshow(cm, cmap=cmap)
-        for (i, j), v in np.ndenumerate(cm):
-            frac = cm[i, j] / cm.max()
-            ax.text(
-                j, i, f"{v:,}",
-                ha="center", va="center", fontsize=11,
-                color="white" if frac > 0.5 else INK,
-            )
-        ax.set_xticks([0, 1], ["No storm", "Storm"], fontsize=9, color=INK_SECONDARY)
-        ax.set_yticks([0, 1], ["No storm", "Storm"], fontsize=9, color=INK_SECONDARY)
-        ax.set_xlabel("Predicted", color=INK_SECONDARY, fontsize=9)
-        ax.set_ylabel("Actual", color=INK_SECONDARY, fontsize=9)
-        fig.set_facecolor(SURFACE)
-        st.pyplot(fig, width='stretch')
-        plt.close(fig)
-
-    with col_right:
-        st.subheader("Precision–recall curve")
-        prec, rec, _ = precision_recall_curve(y_true, proba)
-        ap_model = average_precision_score(y_true, proba)
-        base_prec = precision_score(y_true, baseline_pred, zero_division=0)
-        base_rec = recall_score(y_true, baseline_pred, zero_division=0)
-
-        fig, ax = plt.subplots(figsize=(4.8, 3.6))
-        ax.plot(rec, prec, color=BLUE, linewidth=2, label=f"Model (AP {ap_model:.2f})")
-        ax.scatter(
-            [base_rec], [base_prec], color=MUTED, s=60, zorder=3,
-            label="Persistence baseline",
+    # ---- per-model decision-threshold sliders (default = tuned optimum) ----
+    thr_cols = st.columns(2)
+    thresholds = {}
+    recommended = {}
+    for col, name in zip(thr_cols, ("XGBoost", "LSTM")):
+        proba_m = scored[name][1]
+        rec_thr = round(float(scored[name][2]["operating_threshold"]), 2)
+        recommended[name] = rec_thr
+        thresholds[name] = col.slider(
+            f"{name} decision threshold",
+            min_value=0.05, max_value=0.99, value=rec_thr, step=0.01,
         )
-        ax.set_xlabel("Recall", color=INK_SECONDARY, fontsize=9)
-        ax.set_ylabel("Precision", color=INK_SECONDARY, fontsize=9)
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1.02)
-        ax.legend(fontsize=8, frameon=False, labelcolor=INK_SECONDARY)
-        style_axes(ax)
-        st.pyplot(fig, width='stretch')
-        plt.close(fig)
+        rec_f1 = f1_score(y_true, (proba_m >= rec_thr).astype(int), zero_division=0)
+        col.caption(f"⭐ Recommended: **{rec_thr:.2f}** → best F1 **{rec_f1:.2f}** "
+                    f"(maximised on validation)")
 
-    tn, fp, fn, tp = cm.ravel()
+    def _preds(name):
+        proba_m = scored[name][1]
+        thr = thresholds[name]
+        return proba_m, (proba_m >= thr).astype(int), thr
+
+    # ---- side-by-side metric comparison ----
+    st.subheader("Head-to-head metrics")
+    rows = {}
+    for name in ("XGBoost", "LSTM"):
+        proba_m, y_pred_m, thr = _preds(name)
+        rows[name] = {
+            "Threshold": round(thr, 2),
+            "Precision": round(precision_score(y_true, y_pred_m, zero_division=0), 2),
+            "Recall": round(recall_score(y_true, y_pred_m, zero_division=0), 2),
+            "F1": round(f1_score(y_true, y_pred_m, zero_division=0), 2),
+            "ROC AUC": round(roc_auc_score(y_true, proba_m), 3),
+            "PR AUC": round(average_precision_score(y_true, proba_m), 3),
+        }
+    st.dataframe(pd.DataFrame(rows).T, width="stretch")
+    st.caption("ROC AUC and PR AUC are threshold-independent, so they don't move with the sliders.")
+
+    # ---- confusion matrices side by side ----
+    st.subheader("Confusion matrices (at the selected thresholds)")
+    cmap = LinearSegmentedColormap.from_list("seq_blue", SEQ_BLUES)
+    cm_cols = st.columns(2)
+    cms = {}
+    for col, name in zip(cm_cols, ("XGBoost", "LSTM")):
+        proba_m, y_pred_m, thr = _preds(name)
+        cm = confusion_matrix(y_true, y_pred_m)
+        cms[name] = cm
+        with col:
+            fig, ax = plt.subplots(figsize=(4.4, 3.6))
+            ax.imshow(cm, cmap=cmap)
+            for (i, j), v in np.ndenumerate(cm):
+                frac = cm[i, j] / cm.max()
+                ax.text(j, i, f"{v:,}", ha="center", va="center", fontsize=11,
+                        color="white" if frac > 0.5 else INK)
+            ax.set_title(f"{name}  (thr {thr:.2f})", fontsize=10, color=INK)
+            ax.set_xticks([0, 1], ["No storm", "Storm"], fontsize=9, color=INK_SECONDARY)
+            ax.set_yticks([0, 1], ["No storm", "Storm"], fontsize=9, color=INK_SECONDARY)
+            ax.set_xlabel("Predicted", color=INK_SECONDARY, fontsize=9)
+            ax.set_ylabel("Actual", color=INK_SECONDARY, fontsize=9)
+            fig.set_facecolor(SURFACE)
+            st.pyplot(fig, width='stretch')
+            plt.close(fig)
+
+    # ---- overlaid precision-recall curves ----
+    st.subheader("Precision–recall curves")
+    model_colors = {"XGBoost": BLUE, "LSTM": RED}
+    fig, ax = plt.subplots(figsize=(6.4, 3.8))
+    for name in ("XGBoost", "LSTM"):
+        proba_m, y_pred_m, thr = _preds(name)
+        prec, rec, _ = precision_recall_curve(y_true, proba_m)
+        ap_model = average_precision_score(y_true, proba_m)
+        ax.plot(rec, prec, color=model_colors[name], linewidth=2, label=f"{name} (AP {ap_model:.2f})")
+        # recommended operating point (star) — always visible so the optimum stays anchored
+        rec_pred = (proba_m >= recommended[name]).astype(int)
+        ax.scatter([recall_score(y_true, rec_pred)], [precision_score(y_true, rec_pred, zero_division=0)],
+                   color=model_colors[name], marker="*", s=190, zorder=4,
+                   edgecolor="white", linewidth=1.0)
+        # current selection (dot) — moves with the slider
+        ax.scatter([recall_score(y_true, y_pred_m)], [precision_score(y_true, y_pred_m, zero_division=0)],
+                   color=model_colors[name], s=55, zorder=5, edgecolor="white", linewidth=1.2)
+    ax.set_xlabel("Recall", color=INK_SECONDARY, fontsize=9)
+    ax.set_ylabel("Precision", color=INK_SECONDARY, fontsize=9)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1.02)
+    ax.legend(fontsize=8, frameon=False, labelcolor=INK_SECONDARY)
+    style_axes(ax)
+    st.pyplot(fig, width='stretch')
+    plt.close(fig)
+    st.caption("⭐ = recommended threshold (best F1) · ● = your selected threshold.")
+
+    # ---- narrative ----
+    bits = []
+    for name in ("XGBoost", "LSTM"):
+        tn, fp, fn, tp = cms[name].ravel()
+        bits.append(f"**{name}** catches {tp} of {tp + fn} storms with {fp} false alarms")
     st.write(
-        f"At this threshold the model catches **{tp} of {tp + fn}** storms in the "
-        f"test period ({df['datetime'].max():%Y-%m-%d} back to {SPLIT_DATE}) with "
-        f"**{fp}** false alarms. The persistence baseline (assume storm continues "
-        f"if Ap is already ≥ {ap_storm_level:.0f}) reaches precision "
-        f"{base_prec:.2f} / recall {base_rec:.2f}."
+        f"On the test period ({SPLIT_DATE} to {df['datetime'].max():%Y-%m-%d}), "
+        + "; ".join(bits) + "."
     )
 
 # --------------------------------------------------------------- explorer --
 else:
     st.title("Forecast explorer")
     st.write(
-        "Step through the held-out test period (2022 onward) and compare the "
+        "Step through the held-out test period (2022 onward) and compare a "
         "model's storm probability with what actually happened."
     )
 
-    model, test, proba = train_model(horizon)
+    explorer_model = st.radio("Model", ["XGBoost", "LSTM"], horizontal=True)
+    test, proba = train_model(horizon, explorer_model)
     test = test.assign(storm_probability=proba)
 
     min_d, max_d = test["datetime"].min().date(), test["datetime"].max().date()
