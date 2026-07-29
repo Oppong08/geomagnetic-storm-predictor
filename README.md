@@ -1,10 +1,8 @@
 # Geomagnetic Storm Predictor
 
----
-
 Forecasting 3-hour-ahead geomagnetic storms from OMNI solar-wind parameters, solar-flare activity, and CME activity. This project was developed through the AI4ALL Ignite program and compares three deployed machine learning classifiers — XGBoost, LSTM, and TCN — through an interactive Streamlit dashboard.
 
-The modeling dataset (`data/time_binned_dataset.csv`) bins 1995–2024 space-weather observations into 3-hour windows. For each forecast horizon, the dataset includes a future Ap target (`ap_target_{H}h`) and a binary storm label (`storm_{H}h`), where `storm_{H}h = 1` if the future Ap index is at least 50, approximately corresponding to Kp 5 geomagnetic storm conditions. The final deployed models focus on the 3-hour-ahead prediction task (`storm_3h`).
+The modeling dataset (`data/time_binned_dataset.csv`) bins 1995–2024 space-weather observations into 3-hour windows. For each forecast horizon — 3, 6, 12, and 24 hours — the dataset includes a future Ap target and a binary storm label. For example, `ap_target_3h` stores the future Ap value 3 hours ahead, and `storm_3h = 1` if that future Ap index is at least 50, approximately corresponding to Kp 5 geomagnetic storm conditions. The final deployed models focus on the 3-hour-ahead prediction task (`storm_3h`).
 
 ## Problem Statement
 
@@ -77,8 +75,6 @@ python -m streamlit run streamlit_app.py
 
 To deploy on [Streamlit Community Cloud](https://share.streamlit.io), point a
 new app at this repo with `streamlit_app.py` as the entrypoint.
-
-## Data Sources
 
 ## Data Sources
 
