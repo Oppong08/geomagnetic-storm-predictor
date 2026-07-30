@@ -1,6 +1,66 @@
+# Aurora mission-control design tokens.
+#
+# Series colours are slots 1-3 of a CVD-validated categorical palette (blue /
+# orange / aqua) — the three that clear the all-pairs colour-blindness and
+# normal-vision separation floors in BOTH modes. Do not nudge these hexes by
+# eye; re-run a palette validator if they ever need to change.
+#
+# Red is deliberately absent from the series colours: it is reserved as a
+# status colour for actual storm events.
+
 [theme]
-base = "light"
+base = "dark"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "'Space Grotesk':https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap"
+baseFontSize = 15
+baseRadius = "0.7rem"
+buttonRadius = "0.55rem"
+showWidgetBorder = true
+showSidebarBorder = true
+linkUnderline = false
+metricValueFontSize = "2rem"
+
+# Chart colours are only configurable at the top level, not per mode, so these
+# are a fallback for any chart that doesn't set its own scale. Every chart in
+# app/charts.py passes the active mode's steps explicitly.
+chartCategoricalColors = ["#2a78d6", "#eb6834", "#1baf7a"]
+chartSequentialColors = [
+    "#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec",
+    "#5598e7", "#3987e5", "#256abf", "#184f95", "#0d366b",
+]
+
+# ------------------------------------------------------------------ light --
+[theme.light]
 primaryColor = "#2a78d6"
-backgroundColor = "#fcfcfb"
-secondaryBackgroundColor = "#f0efec"
+backgroundColor = "#f7f8fa"
+secondaryBackgroundColor = "#ffffff"
 textColor = "#0b0b0b"
+linkColor = "#2a78d6"
+borderColor = "#e1e0d9"
+dataframeBorderColor = "#e1e0d9"
+dataframeHeaderBackgroundColor = "#f0f1f4"
+codeBackgroundColor = "#f0f1f4"
+
+[theme.light.sidebar]
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f0f1f4"
+borderColor = "#e1e0d9"
+primaryColor = "#2a78d6"
+
+# ------------------------------------------------------------------- dark --
+[theme.dark]
+primaryColor = "#3987e5"
+backgroundColor = "#0b0c10"
+secondaryBackgroundColor = "#12131a"
+textColor = "#ffffff"
+linkColor = "#5598e7"
+borderColor = "#262832"
+dataframeBorderColor = "#262832"
+dataframeHeaderBackgroundColor = "#191b24"
+codeBackgroundColor = "#191b24"
+
+[theme.dark.sidebar]
+backgroundColor = "#0d0e13"
+secondaryBackgroundColor = "#191b24"
+borderColor = "#262832"
+primaryColor = "#3987e5"
