@@ -60,11 +60,24 @@ The interactive dashboard (`streamlit_app.py`) serves three deployed classifiers
 
 The dashboard includes:
 
-- project overview and storm activity over time
+- an overview page with a forecast read-out for the latest scored bin, headline dataset statistics, and Ap activity across three solar cycles
 - model performance comparison on the held-out 2022–2024 test period
 - adjustable decision thresholds for each model
 - confusion matrices and precision-recall curves
 - forecast explorer for selected test-period windows
+- storm explorer for individual events, with the solar-wind, flare and CME conditions at their peak
+
+`streamlit_app.py` is a thin entry point; the dashboard itself lives in the `app/` package:
+
+| Module | Responsibility |
+|---|---|
+| `app/theme.py` | design tokens for light and dark, global CSS, active-theme detection |
+| `app/data.py` | dataset loading, model artifacts, cached test-period scoring |
+| `app/charts.py` | Altair chart builders (theme-aware, interactive) |
+| `app/ui.py` | shared components — hero, stat tiles, badges, model cards |
+| `app/nav.py`, `app/pages/` | navigation and one module per page |
+
+The app follows the viewer's light/dark setting; both palettes are defined in `.streamlit/config.toml`, and the theme can be changed from the ⋮ menu under Settings → Appearance.
 
 Run locally:
 
